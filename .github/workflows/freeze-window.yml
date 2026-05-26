@@ -1,0 +1,60 @@
+name: "Layer 1 — Freeze Window"
+
+on:
+  # Weekly cron: every Monday at 09:00 UTC.
+  # This is the digest run — scans all open dependency PRs and updates the tracking issue.
+  schedule:
+    - cron: "0 9 * * 1"
+
+  # PR trigger: fires whenever a new PR is opened.
+  # In PR mode the script classifies just that one PR and labels it.
+  pull_request:
+    types: [opened]
+
+  # Manual trigger: useful for testing the workflow without waiting for Monday,
+  # or for forcing a fresh digest after config changes.
+  workflow_dispatch:
+
+# issues: write       → create/update the weekly digest issue, create labels
+# pull-requests: write → apply freeze:* labels to dependency PRs
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  freeze_check:
+    name: Classify dependency PR freeze status
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install --quiet PyGithub PyYAML
+
+      - name: Install Anthropic SDK (optional)
+        # Only needed if release.ai_summary: true in config.yml.
+        run: pip install --quiet anthropic || true
+
+      - name: Set trigger mode
+        # Tell the Python script whether it was triggered by a PR open or a scheduled run.
+        # The script uses this to decide between "classify one PR" and "scan all PRs + digest".
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "FREEZE_TRIGGER=pr" >> $GITHUB_ENV
+          else
+            echo "FREEZE_TRIGGER=digest" >> $GITHUB_ENV
+          fi
+
+      - name: Run freeze window check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # FREEZE_TRIGGER is set in the previous step (pr | digest)
+        run: python src/freeze_check.py

@@ -1,0 +1,45 @@
+name: "Layer 2 — Breaking-Change Shield"
+
+# Triggered when a PR is opened, updated (synchronize), or reopened.
+# "synchronize" fires on every new push to the PR branch — this ensures the tier
+# label and comment stay current if the PR title is edited or the branch is updated.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# pull-requests: write → add labels, post comments
+# issues: write        → needed by some label-management API calls
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  shield:
+    name: Classify dependency bump type
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install --quiet PyGithub PyYAML
+
+      - name: Install Anthropic SDK (optional)
+        # The Anthropic SDK is only needed if ai_changelog_summary is true in config.yml.
+        # We install it here unconditionally but the script won't call it unless the flag
+        # is set AND ANTHROPIC_API_KEY is present. "|| true" makes a missing package non-fatal.
+        run: pip install --quiet anthropic || true
+
+      - name: Run breaking-change shield
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # ANTHROPIC_API_KEY is only read if ai_changelog_summary: true in config.yml.
+          # If the secret isn't set, the script skips the AI step silently.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python src/breaking_change_shield.py

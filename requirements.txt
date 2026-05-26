@@ -1,0 +1,7 @@
+# Core dependencies — required for all three layers
+PyGithub>=2.1.1        # GitHub API client (create PRs, labels, issues, read events)
+PyYAML>=6.0            # Load config.yml
+
+# Optional — only needed if ai_summary or ai_changelog_summary is set to true in config.yml
+# Install with: pip install anthropic
+anthropic>=0.25.0      # Anthropic Claude API client (Haiku model for AI summaries)

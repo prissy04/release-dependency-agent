@@ -1,0 +1,6 @@
+# Normalize line endings: keep LF everywhere (GitHub Actions runners are Linux)
+* text=auto eol=lf
+
+# Windows batch files need CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf

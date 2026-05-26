@@ -1,0 +1,51 @@
+name: "Layer 3 — Backport"
+
+# Triggered whenever a pull request is closed.
+# The Python script checks whether the PR was actually merged before doing any work.
+on:
+  pull_request:
+    types: [closed]
+
+# Minimal permissions — only what the script actually needs.
+# contents: write  → push the new backport branch
+# pull-requests: write → open the backport PR
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  backport:
+    name: Cherry-pick onto target branches
+    runs-on: ubuntu-latest
+
+    # Early-exit condition: don't even spin up the job if the PR wasn't merged
+    # or if it has no backport labels. This avoids consuming Actions minutes for
+    # every closed PR in a busy repo.
+    if: |
+      github.event.pull_request.merged == true &&
+      contains(toJson(github.event.pull_request.labels.*.name), 'backport:')
+
+    steps:
+      - name: Checkout full git history
+        uses: actions/checkout@v4
+        with:
+          # fetch-depth: 0 fetches the full commit history, including all branches.
+          # This is required so we can cherry-pick commits that exist on other branches.
+          fetch-depth: 0
+          # Use GITHUB_TOKEN so the script can push branches and open PRs.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install --quiet PyGithub PyYAML
+
+      - name: Run backport automation
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITHUB_REPOSITORY and GITHUB_EVENT_PATH are set automatically by Actions.
+          # GITHUB_WORKSPACE is set automatically to the checked-out repo root.
+        run: python src/backport.py

@@ -1,0 +1,67 @@
+# release-dependency-agent — configuration
+# All tunable settings live here. No code edits needed to adopt this tool.
+# See README.md for a full explanation of each setting.
+
+# ─────────────────────────────────────────────────────────────
+# Layer 1 — Dependency freeze window + early-warning system
+# ─────────────────────────────────────────────────────────────
+release:
+  ship_date: "2026-07-15"      # CHANGE THIS: your next ship date in ISO format (YYYY-MM-DD)
+  freeze_window_days: 10        # No non-security dep updates within this many days of ship.
+                                # PRs inside this window get labeled freeze:inside-freeze.
+  tight_window_days: 21         # Warn as "tight" if fewer than this many days remain.
+                                # PRs in this zone get labeled freeze:tight.
+  weekly_digest: true           # Open/update a GitHub Issue each Monday with a risk summary.
+  digest_label: "dependency-digest"  # Label used to track the digest issue (created if absent).
+  ai_summary: false             # Set to true to enhance the weekly digest with a Claude Haiku
+                                # summary. Requires ANTHROPIC_API_KEY in GitHub Secrets.
+                                # Cost: ~1 Haiku API call per week (~$0.001/month).
+
+# ─────────────────────────────────────────────────────────────
+# Layer 2 — Breaking-change shield (tiered approval)
+# ─────────────────────────────────────────────────────────────
+tiers:
+  patch:
+    require_ci: true
+    require_review: false
+    # Patch = bug fixes. CI passing is enough.
+
+  minor:
+    require_ci: true
+    require_review: true
+    require_label: "regression-tested"
+    # Minor = new features, backwards-compatible. A reviewer + regression label required.
+
+  major:
+    require_ci: true
+    require_review: true
+    require_changelog_review: true
+    # Major = may include breaking changes. Full scrutiny: review + changelog must be checked.
+
+  ai_changelog_summary: false   # Set to true to summarize the PR body/release notes via
+                                # Claude Haiku for major/minor bumps.
+                                # Cost: ~1 Haiku call per qualifying PR (~$0.0004/call).
+
+# ─────────────────────────────────────────────────────────────
+# Layer 3 — Label-driven backport automation
+# ─────────────────────────────────────────────────────────────
+backport:
+  label_prefix: "backport:"     # PRs labeled "backport:release/2.1" are backported to
+                                # the release/2.1 branch. Multiple labels = multiple targets.
+  open_as_draft_on_conflict: true  # On cherry-pick conflict: open a draft PR with
+                                   # manual-resolution instructions. Set false to skip entirely
+                                   # (not recommended — you'd lose the tracking PR).
+
+# ─────────────────────────────────────────────────────────────
+# Shared settings
+# ─────────────────────────────────────────────────────────────
+dependency_labels:              # Labels that identify dependency-update PRs.
+  - "dependencies"              # Applied by Dependabot
+  - "dependabot"
+  - "renovate"                  # Applied by Renovate
+
+ai:
+  model: "claude-haiku-4-5-20251001"   # Haiku: cheapest model, respects the $20/month cap.
+                                        # Do not swap in Sonnet/Opus without recalculating cost.
+  max_calls_per_run: 5                  # Hard ceiling on AI calls per workflow run.
+                                        # Never exceeded, even if there are hundreds of PRs.
