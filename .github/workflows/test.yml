@@ -1,0 +1,32 @@
+name: Tests
+
+# Run on every push to main and every PR targeting main.
+# This catches regressions in the pure-logic functions (semver, freeze math)
+# before they reach the default branch — no GitHub token or API calls needed.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Run unit tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        # PyGithub and PyYAML are needed because the src modules import them at the top.
+        # The tests themselves don't call the GitHub API — all tested functions are pure logic.
+        run: pip install --quiet PyGithub PyYAML pytest
+
+      - name: Run tests
+        run: python -m pytest tests/ -v

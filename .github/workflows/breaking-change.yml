@@ -18,6 +18,23 @@ jobs:
     name: Classify dependency bump type
     runs-on: ubuntu-latest
 
+    # Skip the job early for PR events that clearly aren't dependency updates.
+    # This avoids spinning up a full Python environment for every human-authored PR.
+    #
+    # Note: GitHub Actions doesn't support label filtering in the on: block for
+    # pull_request events, so we use a job-level if condition instead.
+    #
+    # Why not filter on the title pattern too?
+    #   GitHub Actions expressions don't support regex, so we only check the two
+    #   most reliable signals (bot login and dependency labels). The Python script
+    #   handles the title pattern as a third fallback for any PRs that slip through.
+    if: |
+      contains(github.event.pull_request.user.login, 'dependabot') ||
+      contains(github.event.pull_request.user.login, 'renovate') ||
+      contains(toJson(github.event.pull_request.labels.*.name), 'dependencies') ||
+      contains(toJson(github.event.pull_request.labels.*.name), 'dependabot') ||
+      contains(toJson(github.event.pull_request.labels.*.name), 'renovate')
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
