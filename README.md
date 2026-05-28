@@ -2,6 +2,26 @@
 
 **Three recurring release-cycle problems, one lightweight process framework.**
 
+![Tests](https://github.com/prissy04/release-dependency-agent/actions/workflows/test.yml/badge.svg)
+![Python 3.11](https://img.shields.io/badge/python-3.11-blue?logo=python&logoColor=white)
+![GitHub Actions](https://img.shields.io/badge/automation-GitHub%20Actions-2088FF?logo=github-actions&logoColor=white)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+
+---
+
+## Table of contents
+
+- [The problem](#the-problem)
+- [Why it's worth fixing (the business case)](#why-its-worth-fixing-the-business-case)
+- [What this is](#what-this-is)
+- [The three layers](#the-three-layers)
+- [Setup](#setup)
+- [Usage](#usage)
+- [Running tests locally](#running-tests-locally)
+- [Configuration reference](#configuration-reference)
+- [Cost](#cost)
+- [Design decisions](#design-decisions)
+
 ---
 
 ## The problem
@@ -20,6 +40,34 @@ Dependabot opens a PR for a major version bump. Nobody flags it as high-risk. It
 You land a critical fix on `main`. Now it needs to go to `release/2.1`, `release/2.0`, and `release/1.9`. Someone has to remember to do that, do it correctly three times, open three PRs, and get three approvals. Stuff gets missed.
 
 These aren't bugs you fix once. They're process gaps that recur every cycle. The goal isn't to eliminate them — it's to build a **repeatable process, backed by automation**, that absorbs them with less scramble and less reliance on people remembering to do things.
+
+---
+
+## Why it's worth fixing (the business case)
+
+These problems are easy to dismiss as "just how it goes near ship." The numbers say otherwise.
+
+**The cost of doing nothing** — estimates based on a mid-size engineering team at an enterprise software company:
+
+| Problem | What it costs | How often | Annual impact |
+|---|---|---|---|
+| Late dependency scramble | 4 engineers × 4 hrs = 16 hrs at $73/hr | 2× per release cycle, 4 cycles/year | ~$9,344 |
+| Undetected breaking change | 2 engineers × 2 days debugging + QA re-run | 1–2× per year | ~$4,672–$9,344 |
+| Manual backporting | 45 min × 8 backports × 3 release branches | Every release cycle | ~$5,256/year |
+
+**Conservative total: ~$19,000–$24,000/year** in engineering time spent on problems that recur mechanically and predictably.
+
+> **How the hourly rate was derived:** The national average salary for a QA/test engineer is approximately $108,546/year. Applying a 1.4× fully-loaded cost multiplier (salary + payroll taxes + benefits + tooling overhead, standard for tech roles) and dividing by 2,080 annual work hours gives **~$73/hour**. Adjust the headcount and salary for your org and the math scales proportionally.
+
+**The breakeven point** is low. Initial setup takes 1–2 hours (copy the workflow files, set a ship date). If the tool prevents even one late-cycle scramble per year, it pays for itself in that first event. Everything after that is recovered time.
+
+**What doesn't show up in the table** is harder to quantify but real:
+
+- **Predictability.** A team that can say "we will ship on this date with these dependencies reviewed" is more trustworthy to stakeholders than one that says "we'll see how the last few weeks go."
+- **On-call reduction.** Dependency regressions caught before ship don't become 2am incidents. The cost of an on-call incident (engineer stress, recovery time, customer trust) dwarfs the cost of a proper review gate.
+- **Security posture.** Patches that don't get backported because the process is painful are patches that sit unapplied on production release branches. That's not a theoretical risk — it's a compliance finding waiting to happen.
+
+**The deeper argument** is that dependency management is a program-management problem, not just a tooling problem. Most teams already have Dependabot or Renovate generating the updates. What they're missing is the *process layer* that answers: when does an update have to be reviewed by, who decides what merges under pressure, and how does a fix actually get onto all the branches that need it? This tool encodes those answers so they don't depend on someone's memory.
 
 ---
 

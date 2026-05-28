@@ -2,18 +2,27 @@
 common.py — Shared helpers used by all three layers.
 
 Provides:
-  - load_config()       Load and validate config.yml with sensible defaults.
-  - get_github_client() Authenticated PyGithub client from GITHUB_TOKEN env var.
-  - parse_semver()      Parse a version string → (major, minor, patch) tuple or None.
-  - classify_bump()     Given two version strings, return "patch" / "minor" / "major" / "unknown".
-  - ensure_label()      Create a repo label if it doesn't already exist.
+  - load_config()           Load and validate config.yml with sensible defaults.
+  - get_github_client()     Authenticated PyGithub client from GITHUB_TOKEN env var.
+  - get_repo_name()         Return 'owner/repo' from GITHUB_REPOSITORY env var.
+  - read_event_payload()    Read the GitHub Actions event JSON payload.
+  - parse_semver()          Parse a version string → (major, minor, patch) tuple or None.
+  - classify_bump()         Given two version strings, return "patch" / "minor" / "major" / "unknown".
+  - ensure_label()          Create a repo label if it doesn't already exist.
+  - is_dependency_pr()      Detect whether a PR is a dependency update (three-signal heuristic).
 
 Why a shared module?
   Each layer is an independent script, but they all need GitHub access, config, and semver logic.
   Centralizing here means one place to fix bugs and one place to add logging later.
+  Previously read_event_payload, get_repo_name, and is_dependency_pr were duplicated across
+  freeze_check.py and breaking_change_shield.py — a single bug fix would have to be applied
+  in two places. They live here now.
 """
 
+import json
 import os
+import re
+
 import yaml
 
 # PyGithub — the main library we use to talk to the GitHub API (create PRs, labels, issues).
@@ -95,7 +104,7 @@ def load_config(path=None):
 
 
 # ─────────────────────────────────────────────────────────────
-# GitHub client
+# GitHub client and environment helpers
 # ─────────────────────────────────────────────────────────────
 
 def get_github_client():
@@ -118,6 +127,97 @@ def get_github_client():
             "For local testing, run: set GITHUB_TOKEN=<your-personal-access-token>"
         )
     return Github(token)
+
+
+def get_repo_name():
+    """
+    Return 'owner/repo' from the GITHUB_REPOSITORY environment variable.
+
+    GitHub Actions sets this automatically. For local testing, set it manually:
+      set GITHUB_REPOSITORY=owner/repo-name
+
+    Raises:
+        EnvironmentError: If GITHUB_REPOSITORY is not set.
+    """
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    if not repo:
+        raise EnvironmentError(
+            "GITHUB_REPOSITORY is not set.\n"
+            "In GitHub Actions, this is provided automatically.\n"
+            "For local testing, run: set GITHUB_REPOSITORY=owner/repo-name"
+        )
+    return repo
+
+
+def read_event_payload():
+    """
+    Read the GitHub Actions event payload from the JSON file at GITHUB_EVENT_PATH.
+
+    GitHub Actions writes the full webhook event to a JSON file and sets
+    GITHUB_EVENT_PATH to its location. This gives us PR numbers, labels, merge
+    status, and more — without extra API calls.
+
+    Returns:
+        The event payload as a dict, or None if GITHUB_EVENT_PATH is not set
+        (so callers that want a soft failure can check for None instead of catching).
+
+    Raises:
+        FileNotFoundError / json.JSONDecodeError: If the file is missing or malformed.
+    """
+    event_path = os.environ.get("GITHUB_EVENT_PATH")
+    if not event_path:
+        return None
+    with open(event_path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+# ─────────────────────────────────────────────────────────────
+# Dependency PR detection
+# ─────────────────────────────────────────────────────────────
+
+def is_dependency_pr(pr, dep_labels):
+    """
+    Determine whether a PR is a dependency update.
+
+    Uses three signals (OR logic — any one is sufficient):
+    1. Label match: the PR has a label in the configured dependency_labels list
+                    (e.g. "dependencies", "dependabot", "renovate").
+    2. Bot author:  the PR was opened by dependabot[bot] or renovate[bot].
+    3. Title pattern: the title matches "from X.Y.Z to A.B.C" (common in both tools).
+
+    Why three signals?
+      Teams configure Dependabot/Renovate differently. Some apply labels; some don't.
+      Some use the default bot account; some proxy through a custom app. Covering all
+      three patterns makes the detection robust without requiring any specific setup.
+
+    Why is this in common.py?
+      This logic was previously duplicated in freeze_check.py and breaking_change_shield.py
+      with an inline comment saying "same logic as the other file." Centralizing it means
+      one fix covers both layers automatically.
+
+    Args:
+        pr:         PyGithub PullRequest object.
+        dep_labels: Iterable of label name strings from config (e.g. ["dependencies", "renovate"]).
+
+    Returns:
+        True if any signal matches; False otherwise.
+    """
+    pr_label_names = {label.name.lower() for label in pr.labels}
+    if pr_label_names & {lbl.lower() for lbl in dep_labels}:
+        return True
+
+    author = pr.user.login.lower()
+    if "dependabot" in author or "renovate" in author:
+        return True
+
+    if re.search(
+        r"\bfrom\s+v?[\d]+(?:\.[\d]+)*\s+to\s+v?[\d]+(?:\.[\d]+)*",
+        pr.title,
+        re.IGNORECASE,
+    ):
+        return True
+
+    return False
 
 
 # ─────────────────────────────────────────────────────────────

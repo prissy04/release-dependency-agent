@@ -19,18 +19,19 @@ How to run this manually:
     python src/freeze_check.py
 """
 
-import json
 import os
-import re
 import sys
 from datetime import date
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
-from common import load_config, get_github_client, ensure_label
-
-CONFIG = load_config()
-RELEASE = CONFIG["release"]
-DEP_LABELS = set(CONFIG["dependency_labels"])
+from common import (
+    load_config,
+    get_github_client,
+    get_repo_name,
+    read_event_payload,
+    is_dependency_pr,
+    ensure_label,
+)
 
 # Freeze status levels — these map directly to label names and digest sections
 FREEZE_SAFE   = "safe"
@@ -48,29 +49,6 @@ DIGEST_ISSUE_TITLE_PREFIX = "📦 Weekly Dependency Risk Digest"
 
 
 # ─────────────────────────────────────────────────────────────
-# Environment helpers
-# ─────────────────────────────────────────────────────────────
-
-def read_event_payload():
-    """Read the GitHub Actions event payload. Returns None if not available."""
-    event_path = os.environ.get("GITHUB_EVENT_PATH")
-    if not event_path:
-        return None
-    try:
-        with open(event_path, encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return None
-
-
-def get_repo_name():
-    repo = os.environ.get("GITHUB_REPOSITORY")
-    if not repo:
-        raise EnvironmentError("GITHUB_REPOSITORY is not set.")
-    return repo
-
-
-# ─────────────────────────────────────────────────────────────
 # Core freeze window logic
 # ─────────────────────────────────────────────────────────────
 
@@ -83,6 +61,10 @@ def days_until_ship(ship_date_str):
 
     Args:
         ship_date_str: ISO format date string, e.g. "2026-07-15".
+
+    Raises:
+        ValueError: If ship_date_str is not a valid ISO date. The caller
+                    (main()) catches this and exits with a clear message.
     """
     ship = date.fromisoformat(ship_date_str)
     return (ship - date.today()).days
@@ -123,26 +105,6 @@ def classify_freeze_status(days_to_ship, freeze_window_days, tight_window_days):
     if days_to_ship <= tight_window_days:
         return FREEZE_TIGHT
     return FREEZE_SAFE
-
-
-# ─────────────────────────────────────────────────────────────
-# Dependency PR detection
-# ─────────────────────────────────────────────────────────────
-
-def is_dependency_pr(pr, dep_labels):
-    """
-    Determine whether a PR is a dependency update.
-    Same three-signal OR logic as in breaking_change_shield.py — see that file for rationale.
-    """
-    pr_label_names = {label.name.lower() for label in pr.labels}
-    if pr_label_names & {lbl.lower() for lbl in dep_labels}:
-        return True
-    author = pr.user.login.lower()
-    if "dependabot" in author or "renovate" in author:
-        return True
-    if re.search(r"\bfrom\s+v?[\d]+(?:\.[\d]+)*\s+to\s+v?[\d]+(?:\.[\d]+)*", pr.title, re.IGNORECASE):
-        return True
-    return False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -267,7 +229,7 @@ def build_digest_body(dep_prs_by_status, days_to_ship, ship_date_str, freeze_win
 # Optional AI digest summary
 # ─────────────────────────────────────────────────────────────
 
-def get_ai_digest_intro(dep_prs_by_status, ai_config, max_calls_tracker):
+def get_ai_digest_intro(dep_prs_by_status, release_config, ai_config, max_calls_tracker):
     """
     (Optional) Call Claude Haiku to write a 2-3 sentence plain-English intro for the digest.
 
@@ -287,7 +249,7 @@ def get_ai_digest_intro(dep_prs_by_status, ai_config, max_calls_tracker):
     Returns:
         A summary string, or None if the feature is disabled or skipped.
     """
-    if not RELEASE.get("ai_summary", False):
+    if not release_config.get("ai_summary", False):
         return None
 
     if max_calls_tracker["count"] >= max_calls_tracker["limit"]:
@@ -348,7 +310,7 @@ def get_ai_digest_intro(dep_prs_by_status, ai_config, max_calls_tracker):
 # Digest issue management
 # ─────────────────────────────────────────────────────────────
 
-def find_or_update_digest_issue(repo, title, body):
+def find_or_update_digest_issue(repo, title, body, digest_label):
     """
     Find an existing open digest issue and update it, or create a new one.
 
@@ -364,7 +326,6 @@ def find_or_update_digest_issue(repo, title, body):
       A running issue preserves the comment thread and notification history.
       Teams that discuss dependencies in the issue thread don't lose that context.
     """
-    digest_label = RELEASE.get("digest_label", "dependency-digest")
     ensure_label(repo, digest_label, "0075ca", "Weekly dependency risk digest issue")
 
     for issue in repo.get_issues(state="open", labels=[digest_label]):
@@ -387,7 +348,7 @@ def find_or_update_digest_issue(repo, title, body):
 # Mode handlers
 # ─────────────────────────────────────────────────────────────
 
-def process_single_pr(repo, pr_number, days_to_ship, freeze_window_days, tight_window_days):
+def process_single_pr(repo, pr_number, days_to_ship, freeze_window_days, tight_window_days, dep_labels):
     """
     PR mode: classify and label a single dependency PR.
     Called when a new PR is opened (fast, minimal API calls).
@@ -395,7 +356,7 @@ def process_single_pr(repo, pr_number, days_to_ship, freeze_window_days, tight_w
     pr = repo.get_pull(pr_number)
     print(f"Checking PR #{pr.number}: {pr.title}")
 
-    if not is_dependency_pr(pr, DEP_LABELS):
+    if not is_dependency_pr(pr, dep_labels):
         print("  Not a dependency PR — skipping.")
         return
 
@@ -404,15 +365,20 @@ def process_single_pr(repo, pr_number, days_to_ship, freeze_window_days, tight_w
     print(f"  Status: {status} ({days_to_ship} days to ship)")
 
 
-def process_all_prs_for_digest(repo, days_to_ship, freeze_window_days, tight_window_days, ship_date_str):
+def process_all_prs_for_digest(repo, days_to_ship, freeze_window_days, tight_window_days, ship_date_str, config):
     """
     Digest mode: scan all open dependency PRs, classify them, and create/update the weekly issue.
     Called on the weekly cron and workflow_dispatch.
     """
+    release_config = config["release"]
+    dep_labels     = config["dependency_labels"]
+    ai_config      = config.get("ai", {})
+    digest_label   = release_config.get("digest_label", "dependency-digest")
+
     dep_prs_by_status = {FREEZE_INSIDE: [], FREEZE_TIGHT: [], FREEZE_SAFE: []}
 
     for pr in repo.get_pulls(state="open"):
-        if not is_dependency_pr(pr, DEP_LABELS):
+        if not is_dependency_pr(pr, dep_labels):
             continue
         status = classify_freeze_status(days_to_ship, freeze_window_days, tight_window_days)
         apply_freeze_label(repo, pr, status)
@@ -422,9 +388,8 @@ def process_all_prs_for_digest(repo, days_to_ship, freeze_window_days, tight_win
     print(f"Classified {total} open dependency PR(s).")
 
     # (Optional) AI intro — gated behind config flag
-    ai_config = CONFIG.get("ai", {})
     max_calls_tracker = {"count": 0, "limit": ai_config.get("max_calls_per_run", 5)}
-    ai_intro = get_ai_digest_intro(dep_prs_by_status, ai_config, max_calls_tracker)
+    ai_intro = get_ai_digest_intro(dep_prs_by_status, release_config, ai_config, max_calls_tracker)
 
     digest_body = build_digest_body(
         dep_prs_by_status, days_to_ship, ship_date_str, freeze_window_days, tight_window_days
@@ -440,7 +405,7 @@ def process_all_prs_for_digest(repo, days_to_ship, freeze_window_days, tight_win
 
     today_str = date.today().isoformat()
     digest_title = f"{DIGEST_ISSUE_TITLE_PREFIX} — {today_str}"
-    find_or_update_digest_issue(repo, digest_title, digest_body)
+    find_or_update_digest_issue(repo, digest_title, digest_body, digest_label)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -448,16 +413,33 @@ def process_all_prs_for_digest(repo, days_to_ship, freeze_window_days, tight_win
 # ─────────────────────────────────────────────────────────────
 
 def main():
-    ship_date_str = RELEASE.get("ship_date")
+    # Load config here in main(), not at module level.
+    # Module-level loading would run on import and require config.yml to be present
+    # even when just importing a helper function (e.g. in tests). Loading in main()
+    # keeps imports side-effect-free.
+    config         = load_config()
+    release_config = config["release"]
+    dep_labels     = set(config["dependency_labels"])
+
+    ship_date_str = release_config.get("ship_date")
     if not ship_date_str:
         print("ERROR: release.ship_date is not configured in config.yml.")
-        print("Set it to your next ship date in ISO format, e.g.: ship_date: \"2026-07-15\"")
+        print('Set it to your next ship date in ISO format, e.g.: ship_date: "2026-07-15"')
         sys.exit(1)
 
-    freeze_window_days = RELEASE.get("freeze_window_days", 10)
-    tight_window_days  = RELEASE.get("tight_window_days", freeze_window_days * 2)
+    # Validate the date format early. date.fromisoformat() raises ValueError for
+    # wrong formats like "07/15/2026" (MM/DD/YYYY). Catching it here gives the user
+    # a plain-English message instead of a raw Python traceback.
+    try:
+        days_to_ship = days_until_ship(ship_date_str)
+    except ValueError:
+        print(f"ERROR: ship_date '{ship_date_str}' is not a valid date.")
+        print('The format must be YYYY-MM-DD (ISO 8601), e.g.: ship_date: "2026-07-15"')
+        sys.exit(1)
 
-    days_to_ship = days_until_ship(ship_date_str)
+    freeze_window_days = release_config.get("freeze_window_days", 10)
+    tight_window_days  = release_config.get("tight_window_days", freeze_window_days * 2)
+
     print(f"Ship date: {ship_date_str} | Days remaining: {days_to_ship}")
     print(f"Freeze window: {freeze_window_days} days | Tight window: {tight_window_days} days")
 
@@ -473,13 +455,15 @@ def main():
         payload = read_event_payload()
         if payload and "pull_request" in payload:
             pr_number = payload["pull_request"]["number"]
-            process_single_pr(repo, pr_number, days_to_ship, freeze_window_days, tight_window_days)
+            process_single_pr(
+                repo, pr_number, days_to_ship, freeze_window_days, tight_window_days, dep_labels
+            )
         else:
             print("PR trigger set but no pull_request in event payload — nothing to do.")
     else:
-        if RELEASE.get("weekly_digest", True):
+        if release_config.get("weekly_digest", True):
             process_all_prs_for_digest(
-                repo, days_to_ship, freeze_window_days, tight_window_days, ship_date_str
+                repo, days_to_ship, freeze_window_days, tight_window_days, ship_date_str, config
             )
         else:
             print("weekly_digest is disabled in config.yml — skipping digest creation.")

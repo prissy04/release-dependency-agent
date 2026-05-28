@@ -16,7 +16,6 @@ How to run this manually (for testing):
     python src/backport.py
 """
 
-import json
 import os
 import re
 import subprocess
@@ -24,41 +23,11 @@ import sys
 
 # Adjust path so this file can be run directly from the repo root
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
-from common import load_config, get_github_client
+from common import load_config, get_github_client, get_repo_name, read_event_payload
 
 CONFIG = load_config()
 LABEL_PREFIX = CONFIG["backport"]["label_prefix"]
 OPEN_DRAFT_ON_CONFLICT = CONFIG["backport"]["open_as_draft_on_conflict"]
-
-
-# ─────────────────────────────────────────────────────────────
-# Environment helpers
-# ─────────────────────────────────────────────────────────────
-
-def read_event_payload():
-    """
-    Read the GitHub Actions event payload.
-
-    GitHub Actions writes the full webhook event to a JSON file and sets
-    GITHUB_EVENT_PATH to its location. This is how we know which PR was merged,
-    what labels it had, and so on — without any additional API calls.
-    """
-    event_path = os.environ.get("GITHUB_EVENT_PATH")
-    if not event_path:
-        raise EnvironmentError(
-            "GITHUB_EVENT_PATH is not set. This script is designed to run inside GitHub Actions.\n"
-            "For local testing, point GITHUB_EVENT_PATH at a JSON file containing a sample event."
-        )
-    with open(event_path, encoding="utf-8") as f:
-        return json.load(f)
-
-
-def get_repo_name():
-    """Return 'owner/repo' from the GITHUB_REPOSITORY environment variable."""
-    repo = os.environ.get("GITHUB_REPOSITORY")
-    if not repo:
-        raise EnvironmentError("GITHUB_REPOSITORY is not set.")
-    return repo
 
 
 # ─────────────────────────────────────────────────────────────
@@ -130,6 +99,30 @@ def configure_git_identity():
     run_git("config", "user.name", "github-actions[bot]")
 
 
+def fetch_pr_commits(pr_number):
+    """
+    Fetch the PR's source commits via GitHub's persistent PR ref.
+
+    Why fetch refs/pull/N/head explicitly?
+      After a PR is merged, the feature branch is often deleted. GitHub Actions'
+      fetch-depth: 0 fetches all branches (refs/heads/*) and tags, but NOT PR refs.
+      This means the individual commit SHAs from a squash-merged or rebase-merged PR
+      won't exist locally — cherry-pick would fail with "bad object" errors.
+
+      refs/pull/N/head is a GitHub-managed ref that persists even after branch deletion.
+      Fetching it makes the original commit SHAs accessible regardless of merge strategy:
+        - Squash merge: individual pre-squash commits exist here → cherry-picks them cleanly
+        - Rebase merge: original commit SHAs exist here → equivalent to the rebased versions
+        - Merge commit: commits are already in history, but fetching here is still safe
+
+    Args:
+        pr_number: The integer PR number.
+    """
+    pr_ref = f"refs/pull/{pr_number}/head"
+    run_git("fetch", "origin", pr_ref)
+    print(f"  Fetched {pr_ref} to make PR commits available for cherry-pick.")
+
+
 def attempt_cherry_pick(commits, target_branch, backport_branch):
     """
     Create a new branch from target_branch and cherry-pick each commit onto it.
@@ -193,12 +186,20 @@ def push_branch(branch_name):
 # PR creation
 # ─────────────────────────────────────────────────────────────
 
-def build_pr_body(original_pr, target_branch, conflicted_commits):
+def build_pr_body(original_pr, target_branch, backport_branch, conflicted_commits):
     """
     Build the pull request body for a backport PR.
 
     Clean cherry-pick: concise confirmation with a link back to the original PR.
     Conflict:         clear, specific instructions on what the developer needs to do.
+
+    Args:
+        original_pr:        PyGithub PullRequest object of the merged source PR.
+        target_branch:      The release branch we're backporting onto.
+        backport_branch:    The actual name of the branch we created and pushed.
+                            Used in the checkout instruction so the user gets the right
+                            branch name — previously this was computed incorrectly here.
+        conflicted_commits: List of SHAs that failed to cherry-pick (empty if clean).
     """
     header = (
         f"Backport of #{original_pr.number} "
@@ -227,7 +228,7 @@ def build_pr_body(original_pr, target_branch, conflicted_commits):
             f"1. Check out this branch locally:\n"
             f"   ```\n"
             f"   git fetch origin\n"
-            f"   git checkout {target_branch.replace('/', '-')}-backport\n"
+            f"   git checkout {backport_branch}\n"
             f"   ```\n"
             f"2. Manually cherry-pick the conflicting commit(s) from the original PR:\n"
             f"   ```\n"
@@ -256,7 +257,7 @@ def create_backport_pr(repo, original_pr, target_branch, backport_branch, confli
     open_as_draft = not is_clean and OPEN_DRAFT_ON_CONFLICT
 
     pr_title = f"[backport] {original_pr.title} → `{target_branch}`"
-    pr_body = build_pr_body(original_pr, target_branch, conflicted_commits)
+    pr_body = build_pr_body(original_pr, target_branch, backport_branch, conflicted_commits)
 
     new_pr = repo.create_pull(
         title=pr_title,
@@ -277,6 +278,11 @@ def create_backport_pr(repo, original_pr, target_branch, backport_branch, confli
 
 def main():
     payload = read_event_payload()
+    if not payload:
+        raise EnvironmentError(
+            "GITHUB_EVENT_PATH is not set. This script is designed to run inside GitHub Actions.\n"
+            "For local testing, point GITHUB_EVENT_PATH at a JSON file containing a sample event."
+        )
     pr_data = payload.get("pull_request", {})
 
     # Guard: do nothing if the PR was closed without merging
@@ -300,10 +306,15 @@ def main():
     print(f"PR #{pr.number} merged: '{pr.title}'")
     print(f"Backport targets: {targets}")
 
-    # Get the commits in this PR to cherry-pick
-    # Using pr.get_commits() works regardless of whether the PR was squash-merged,
-    # merge-committed, or rebased — we get the individual commits in order.
+    # Fetch the PR's source commits from GitHub's persistent PR ref.
+    # This is required because:
+    #   - For squash/rebase merges, the original commit SHAs aren't in main's history.
+    #   - GitHub Actions' fetch-depth: 0 fetches branches and tags, but not refs/pull/*.
+    #   - Without this fetch, cherry-pick would fail with "bad object" for those SHAs.
+    # See fetch_pr_commits() docstring for a full explanation.
+    fetch_pr_commits(pr.number)
     commits = [c.sha for c in pr.get_commits()]
+
     if not commits:
         print("No commits found in PR — skipping.")
         return

@@ -18,17 +18,20 @@ How to run this manually (for testing):
     python src/breaking_change_shield.py
 """
 
-import json
 import os
 import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
-from common import load_config, get_github_client, classify_bump, ensure_label
-
-CONFIG = load_config()
-TIER_CONFIG = CONFIG["tiers"]
-DEP_LABELS = set(CONFIG["dependency_labels"])
+from common import (
+    load_config,
+    get_github_client,
+    get_repo_name,
+    read_event_payload,
+    is_dependency_pr,
+    classify_bump,
+    ensure_label,
+)
 
 # This marker is embedded in every comment we post so we can find and update it
 # next time instead of posting a new comment on each PR synchronize event.
@@ -41,58 +44,6 @@ TIER_LABEL_COLORS = {
     "major":   "d73a4a",  # red
     "unknown": "ededed",  # grey (couldn't parse versions)
 }
-
-
-# ─────────────────────────────────────────────────────────────
-# Environment helpers
-# ─────────────────────────────────────────────────────────────
-
-def read_event_payload():
-    event_path = os.environ.get("GITHUB_EVENT_PATH")
-    if not event_path:
-        raise EnvironmentError("GITHUB_EVENT_PATH is not set.")
-    with open(event_path, encoding="utf-8") as f:
-        return json.load(f)
-
-
-def get_repo_name():
-    repo = os.environ.get("GITHUB_REPOSITORY")
-    if not repo:
-        raise EnvironmentError("GITHUB_REPOSITORY is not set.")
-    return repo
-
-
-# ─────────────────────────────────────────────────────────────
-# Dependency PR detection
-# ─────────────────────────────────────────────────────────────
-
-def is_dependency_pr(pr, dep_labels):
-    """
-    Determine whether a PR is a dependency update.
-
-    Uses three signals (OR logic — any one is sufficient):
-    1. Label match: the PR has a label in the configured dependency_labels list
-                    (e.g. "dependencies", "dependabot", "renovate").
-    2. Bot author:  the PR was opened by dependabot[bot] or renovate[bot].
-    3. Title pattern: the title matches "from X.Y.Z to A.B.C" (common in both tools).
-
-    Why three signals?
-      Teams configure Dependabot/Renovate differently. Some apply labels; some don't.
-      Some use the default bot account; some proxy through a custom app. Covering all
-      three patterns makes the detection robust without requiring any specific setup.
-    """
-    pr_label_names = {label.name.lower() for label in pr.labels}
-    if pr_label_names & {lbl.lower() for lbl in dep_labels}:
-        return True
-
-    author = pr.user.login.lower()
-    if "dependabot" in author or "renovate" in author:
-        return True
-
-    if re.search(r"\bfrom\s+v?[\d]+(?:\.[\d]+)*\s+to\s+v?[\d]+(?:\.[\d]+)*", pr.title, re.IGNORECASE):
-        return True
-
-    return False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -147,15 +98,21 @@ def apply_tier_label(repo, pr, bump_type):
 # Comment building
 # ─────────────────────────────────────────────────────────────
 
-def build_status_comment(bump_type, old_version, new_version):
+def build_status_comment(bump_type, old_version, new_version, tier_config):
     """
     Build the tier status comment text.
 
     Tone: direct and informative, not bureaucratic. A developer reading this
     should immediately understand what they need to do and why — not feel like
     they're reading a policy document.
+
+    Args:
+        bump_type:   "patch", "minor", "major", or "unknown".
+        old_version: The version string before the bump (may be None).
+        new_version: The version string after the bump (may be None).
+        tier_config: The tiers section of config — used to look up requirements.
     """
-    tier = TIER_CONFIG.get(bump_type, {})
+    tier = tier_config.get(bump_type, {})
 
     bump_descriptions = {
         "patch":   "a **patch bump** — bug fixes only, low risk",
@@ -239,7 +196,7 @@ def post_or_update_comment(pr, body):
 # Optional AI changelog summary
 # ─────────────────────────────────────────────────────────────
 
-def get_ai_changelog_summary(pr, bump_type, ai_config, max_calls_tracker):
+def get_ai_changelog_summary(pr, bump_type, tier_config, ai_config, max_calls_tracker):
     """
     (Optional) Use Claude Haiku to summarize potential breaking changes from the PR body.
 
@@ -252,10 +209,17 @@ def get_ai_changelog_summary(pr, bump_type, ai_config, max_calls_tracker):
     Cost per call: ~1,000 input tokens + ~300 output tokens ≈ $0.0004 at Haiku rates.
     A team with 10 major/minor dep PRs/month would spend ~$0.004/month on this feature.
 
+    Args:
+        pr:                PyGithub PullRequest object.
+        bump_type:         "patch", "minor", "major", or "unknown".
+        tier_config:       The tiers section of config (checked for ai_changelog_summary flag).
+        ai_config:         The ai section of config (model name, max_calls_per_run).
+        max_calls_tracker: Mutable dict {"count": int, "limit": int} shared across the run.
+
     Returns:
         A summary string, or None if the feature is disabled or skipped.
     """
-    if not TIER_CONFIG.get("ai_changelog_summary", False):
+    if not tier_config.get("ai_changelog_summary", False):
         return None  # Feature is off by default
 
     if bump_type not in ("minor", "major"):
@@ -308,7 +272,18 @@ def get_ai_changelog_summary(pr, bump_type, ai_config, max_calls_tracker):
 # ─────────────────────────────────────────────────────────────
 
 def main():
+    # Load config here in main(), not at module level.
+    # Module-level loading runs on import and would require config.yml to be present
+    # even when just importing a helper function (e.g. in tests). Loading in main()
+    # keeps imports side-effect-free.
+    config      = load_config()
+    tier_config = config["tiers"]
+    dep_labels  = set(config["dependency_labels"])
+    ai_config   = config.get("ai", {})
+
     payload = read_event_payload()
+    if not payload:
+        raise EnvironmentError("GITHUB_EVENT_PATH is not set. This script runs inside GitHub Actions.")
     pr_data = payload.get("pull_request", {})
 
     repo_name = get_repo_name()
@@ -318,7 +293,7 @@ def main():
 
     print(f"Processing PR #{pr.number}: {pr.title}")
 
-    if not is_dependency_pr(pr, DEP_LABELS):
+    if not is_dependency_pr(pr, dep_labels):
         print("  Not a dependency PR — skipping.")
         return
 
@@ -336,15 +311,14 @@ def main():
     apply_tier_label(repo, pr, bump_type)
 
     # (Optional) AI changelog summary — gated behind config flag and call limit
-    ai_config = CONFIG.get("ai", {})
     max_calls_tracker = {
         "count": 0,
         "limit": ai_config.get("max_calls_per_run", 5),
     }
-    ai_summary = get_ai_changelog_summary(pr, bump_type, ai_config, max_calls_tracker)
+    ai_summary = get_ai_changelog_summary(pr, bump_type, tier_config, ai_config, max_calls_tracker)
 
     # Build the comment body
-    comment_body = build_status_comment(bump_type, old_version, new_version)
+    comment_body = build_status_comment(bump_type, old_version, new_version, tier_config)
     if ai_summary:
         comment_body += (
             f"\n\n---\n\n"
