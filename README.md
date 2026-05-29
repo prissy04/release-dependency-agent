@@ -253,3 +253,8 @@ Because partial adoption is still useful. If you only want backport automation, 
 
 **Why Haiku for AI?**
 It's cheap, fast, and the tasks here (summarize a digest, read a changelog) don't need a more capable model. Using Haiku keeps the monthly AI cost negligible even if the features run daily.
+
+**Is this tied to a specific cloud provider?**
+No — for the compute layer. GitHub Actions runs on standard Ubuntu runners that GitHub provisions, so there's no AWS, Azure, or GCP infrastructure you need to manage or be locked into. Your team's other infrastructure can live anywhere.
+
+What the tool does require is **GitHub** as your code hosting platform. The Python scripts use the GitHub API to create issues, apply labels, and open pull requests — those are GitHub-specific integrations. Teams already on GitHub with Dependabot or Renovate can adopt this with no infrastructure changes. Teams on GitLab, Azure DevOps, or Bitbucket would need the API layer rewritten for their platform.
