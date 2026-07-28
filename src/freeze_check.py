@@ -106,6 +106,7 @@ def classify_freeze_status(days_to_ship, freeze_window_days, tight_window_days):
         return FREEZE_TIGHT
     return FREEZE_SAFE
 
+
 def normalize_ship_date(ship_date_str, auto_advance_days):
     """
     Advance a stale ship date by repeated fixed intervals until it reaches today or later.
