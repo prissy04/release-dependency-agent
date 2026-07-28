@@ -21,7 +21,7 @@ How to run this manually:
 
 import os
 import sys
-from datetime import date
+from datetime import date, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 from common import (
@@ -106,6 +106,21 @@ def classify_freeze_status(days_to_ship, freeze_window_days, tight_window_days):
         return FREEZE_TIGHT
     return FREEZE_SAFE
 
+def normalize_ship_date(ship_date_str, auto_advance_days):
+    """
+    Advance a stale ship date by repeated fixed intervals until it reaches today or later.
+
+    This avoids repeated "ship date has passed" warnings when the configured
+    date is a stale milestone for a regularly scheduled release cadence.
+    """
+    ship = date.fromisoformat(ship_date_str)
+    if auto_advance_days <= 0:
+        return ship_date_str, (ship - date.today()).days
+
+    while ship < date.today():
+        ship += timedelta(days=auto_advance_days)
+
+    return ship.isoformat(), (ship - date.today()).days
 
 # ─────────────────────────────────────────────────────────────
 # Label application
@@ -431,11 +446,18 @@ def main():
     # wrong formats like "07/15/2026" (MM/DD/YYYY). Catching it here gives the user
     # a plain-English message instead of a raw Python traceback.
     try:
-        days_to_ship = days_until_ship(ship_date_str)
+        ship_date_str, days_to_ship = normalize_ship_date(
+            ship_date_str, release_config.get("auto_advance_days", 30)
+        )
     except ValueError:
         print(f"ERROR: ship_date '{ship_date_str}' is not a valid date.")
         print('The format must be YYYY-MM-DD (ISO 8601), e.g.: ship_date: "2026-07-15"')
         sys.exit(1)
+
+    if ship_date_str != release_config.get("ship_date"):
+        print(
+            f"INFO: configured ship_date has passed; auto-advanced to {ship_date_str}."
+        )
 
     freeze_window_days = release_config.get("freeze_window_days", 10)
     tight_window_days  = release_config.get("tight_window_days", freeze_window_days * 2)

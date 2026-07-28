@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from freeze_check import (
     classify_freeze_status,
     days_until_ship,
+    normalize_ship_date,
     FREEZE_SAFE,
     FREEZE_TIGHT,
     FREEZE_INSIDE,
@@ -63,6 +64,18 @@ class TestDaysUntilShip(unittest.TestCase):
     def test_far_past(self):
         past = (date.today() - timedelta(days=90)).isoformat()
         self.assertEqual(days_until_ship(past), -90)
+
+    def test_normalize_ship_date_advances_past_date(self):
+        past = (date.today() - timedelta(days=15)).isoformat()
+        normalized_date, days_remaining = normalize_ship_date(past, 30)
+        self.assertEqual(days_remaining, 15)
+        self.assertEqual(normalized_date, (date.today() + timedelta(days=15)).isoformat())
+
+    def test_normalize_ship_date_no_advancement_when_zero(self):
+        past = (date.today() - timedelta(days=15)).isoformat()
+        normalized_date, days_remaining = normalize_ship_date(past, 0)
+        self.assertEqual(days_remaining, -15)
+        self.assertEqual(normalized_date, past)
 
 
 class TestClassifyFreezeStatus(unittest.TestCase):

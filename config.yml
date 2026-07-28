@@ -6,11 +6,13 @@
 # Layer 1 — Dependency freeze window + early-warning system
 # ─────────────────────────────────────────────────────────────
 release:
-  ship_date: "2026-07-15"      # CHANGE THIS: your next ship date in ISO format (YYYY-MM-DD)
+  ship_date: "2026-08-15"      # CHANGE THIS: your next ship date in ISO format (YYYY-MM-DD)
   freeze_window_days: 10        # No non-security dep updates within this many days of ship.
                                 # PRs inside this window get labeled freeze:inside-freeze.
   tight_window_days: 21         # Warn as "tight" if fewer than this many days remain.
                                 # PRs in this zone get labeled freeze:tight.
+  auto_advance_days: 90         # If the ship date has passed, roll it forward by this interval.
+                                # A quarterly interval is recommended for a regular release cadence.
   weekly_digest: true           # Open/update a GitHub Issue each Monday with a risk summary.
   digest_label: "dependency-digest"  # Label used to track the digest issue (created if absent).
   ai_summary: false             # Set to true to enhance the weekly digest with a Claude Haiku

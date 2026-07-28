@@ -29,3 +29,6 @@ Thumbs.db
 # Secrets — never commit these
 .env
 *.env
+
+# Personal Claude Code hookify rules — local only
+.claude/*.local.md
